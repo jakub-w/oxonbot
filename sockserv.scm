@@ -9,19 +9,33 @@
 
 (use-modules (ice-9 rdelim)
 	     (ice-9 threads)
+	     (ice-9 suspendable-ports)
 	     (srfi srfi-1)
-	     (rnrs io ports))
+	     (rnrs io ports)
+	     (ice-9 ports internal))
 
+(install-suspendable-ports!)
+(define (read-waiter port)
+  (port-poll port "r" 500))
+(define (write-waiter port)
+  (port-poll port "w" 500))
+
+;; TODO: make this atomic so we can clean it up asynchronously
 (define connection-threads '())
+(define (connection-threads-cleanup)
+  (set! connection-threads
+    (filter (lambda (thread)
+	      (not (thread-exited? thread)))
+	    connection-threads)))
 
 (sigaction SIGINT
   (lambda (x)
+    (display "Cancelling the connection threads...\n")
     (for-each (lambda (thread)
 		; FIXME: this could throw and join-thread would hang
 		;        indefinitely
 		(cancel-thread thread))
 	      connection-threads)
-    (display "Cancelling the connection threads...\n")
     (for-each (lambda (thread)
 		(join-thread thread))
 	      connection-threads)
@@ -35,20 +49,24 @@
     (throw 'bad-client-connection 'connection-handler
 	   "client-connection is not a valid connection"))
   (let ((client (car client-connection))
-	(client-details (cdr client-connection)))
+	(client-id #f))
+    (fcntl client F_SETFL (logior O_NONBLOCK
+    				  (fcntl client F_GETFL)))
+    (set-port-encoding! client "UTF-8")
     (dynamic-wind
       (lambda () #f)
       (lambda ()
 	;; event loop to listen for requests from the client
 	(let ((exit? #f))
-	  (while (not exit?)
-	    (let ((line (read-line client)))
-	      (when (or (and (string? line)
-	    		     (string=? (string-trim-right line) "exit"))
-	    		(eof-object? line))
-	    	(set! exit? #t))
-	      (monitor (display line)
-	    	       (newline))))))
+	  (parameterize ((current-read-waiter read-waiter))
+	    (while (not exit?)
+	      (let ((line (get-line client)))
+		(when (or (and (string? line)
+	    		       (string=? (string-trim-right line) "exit"))
+	    		  (eof-object? line))
+	    	  (set! exit? #t))
+		(monitor (display line)
+	    		 (newline)))))))
       (lambda ()
 	(monitor (format #t "Closing connection: ~a\n" client))
 	(close-port client)))))
@@ -72,18 +90,20 @@
 	  (listen sock 5)
 	  (display "Listening for clients...\n")
 
-	  (let ((new-connection #f)
-		(exit? #f))
-	    (while (not exit?)
-	      (set! new-connection (accept sock))
-	      (if new-connection
-  		  (begin
-		    (format #t "New connection: ~a\n" new-connection)
-		    (set! connection-threads
-		      (cons (begin-thread
-			     (connection-handler new-connection))
-			    connection-threads)))
-  		  (sleep 1)))))
+	  (parameterize ((current-read-waiter read-waiter))
+	    (let ((new-connection #f)
+		  (exit? #f))
+	      (while (not exit?)
+		(set! new-connection (accept sock))
+		(when new-connection
+  		  (format #t "New connection: ~a\n" new-connection)
+		  (set! connection-threads
+		    (cons (begin-thread
+			   (connection-handler new-connection))
+			  connection-threads)))
+		(connection-threads-cleanup)
+		(format #t "Connections active: ~a\n"
+			(length connection-threads))))))
 	(lambda () 			; dynamic wind post_guard
 	  (close sock)
 	  (delete-file sockpath)))))
