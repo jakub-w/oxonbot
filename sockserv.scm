@@ -42,6 +42,29 @@
     (display "All connections were closed.\n")
     (throw 'SIGINT x)))
 
+(define (acquire-context-from-client client-port)
+  (unless (port? client-port)
+    (throw 'bad-client-port 'acquire-context-from-client
+	   "client-port is not a port"))
+  (catch 'return
+    (lambda ()
+      (parameterize ((current-read-waiter read-waiter)
+		     (current-write-waiter write-waiter))
+	;; ask the client for an id
+	(display "SRV:ID" client-port)
+	;; get the response
+	(let ((response (get-line client-port)))
+	  (format #t "Id response for ~a: \"~a\"\n" client-port response)
+	  ;; if the incomming message is not an id, inform the client
+	  ;; and return #f
+	  (unless (string-prefix? "CLT:ID:" response)
+	    (display "SRV:ID_BAD" client-port)
+	    (throw 'return))
+	  ;; else send ack message to a client and return the sent ID
+	  (display "SRV:ID_ACK" client-port)
+	  (substring/shared response 7))))
+    (lambda (key . args) #f)))
+
 (define (connection-handler client-connection)
   "CLIENT-CONNECTION should be a pair returned from the `accept' function."
   (unless (and (pair? client-connection)
@@ -56,17 +79,28 @@
     (dynamic-wind
       (lambda () #f)
       (lambda ()
-	;; event loop to listen for requests from the client
-	(let ((exit? #f))
+	;; identify the client (acquire its context)
+	;; TODO: Create a timeout for identification, after which the
+	;;       connection is dropped
+	(let ((client-context
+	       (do ((context (acquire-context-from-client client)
+			     (acquire-context-from-client client))
+		    (num-tries 1 (1+ num-tries)))
+		   ((or context (> num-tries 3)) context)
+		 (sleep 1))))
+	  (unless client-context
+	    (throw 'client-wont-identify)) ; TODO: catch that exception
 	  (parameterize ((current-read-waiter read-waiter))
-	    (while (not exit?)
-	      (let ((line (get-line client)))
-		(when (or (and (string? line)
-	    		       (string=? (string-trim-right line) "exit"))
-	    		  (eof-object? line))
-	    	  (set! exit? #t))
-		(monitor (display line)
-	    		 (newline)))))))
+	    ;; event loop to listen for requests from the client
+	    (let ((exit? #f))
+	      (while (not exit?)
+		(let ((line (get-line client)))
+		  (when (or (and (string? line)
+	    			 (string=? (string-trim-right line) "exit"))
+	    		    (eof-object? line))
+	    	    (set! exit? #t))
+		  (monitor
+		   (format #t "~a: ~a\n" client-context line))))))))
       (lambda ()
 	(monitor (format #t "Closing connection: ~a\n" client))
 	(close-port client)))))
