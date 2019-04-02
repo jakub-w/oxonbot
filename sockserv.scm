@@ -7,12 +7,17 @@
 ;; Context will be: client_id, path (like server:#channel), caller (username)
 
 
+(add-to-load-path ".")
 (use-modules (ice-9 rdelim)
 	     (ice-9 threads)
 	     (ice-9 suspendable-ports)
 	     (srfi srfi-1)
+	     (srfi srfi-9)
 	     (rnrs io ports)
-	     (ice-9 ports internal))
+	     (ice-9 ports internal)
+	     (oxonbot)
+	     (oxonbot-protocol)
+	     (system repl error-handling))
 
 (install-suspendable-ports!)
 (define (read-waiter port)
@@ -42,68 +47,93 @@
     (display "All connections were closed.\n")
     (throw 'SIGINT x)))
 
-(define (acquire-context-from-client client-port)
-  (unless (port? client-port)
-    (throw 'bad-client-port 'acquire-context-from-client
-	   "client-port is not a port"))
-  (catch 'return
-    (lambda ()
-      (parameterize ((current-read-waiter read-waiter)
-		     (current-write-waiter write-waiter))
-	;; ask the client for an id
-	(display "SRV:ID" client-port)
-	;; get the response
-	(let ((response (get-line client-port)))
-	  (format #t "Id response for ~a: \"~a\"\n" client-port response)
-	  ;; if the incomming message is not an id, inform the client
-	  ;; and return #f
-	  (unless (string-prefix? "CLT:ID:" response)
-	    (display "SRV:ID_BAD" client-port)
-	    (throw 'return))
-	  ;; else send ack message to a client and return the sent ID
-	  (display "SRV:ID_ACK" client-port)
-	  (substring/shared response 7))))
-    (lambda (key . args) #f)))
+(sigaction SIGPIPE
+  ;; (lambda (x)
+  ;;   (display "Pipe was broken. Client dropped the connection?\n"
+  ;; 	     (current-error-port)))
+  SIG_IGN)
 
 (define (connection-handler client-connection)
-  "CLIENT-CONNECTION should be a pair returned from the `accept' function."
+  "This should be used in a separate thread.
+
+CLIENT-CONNECTION should be a pair returned from the `accept' function."
   (unless (and (pair? client-connection)
 	       (port? (car client-connection)))
+    ;; FIXME: change to wrong-type-arg
     (throw 'bad-client-connection 'connection-handler
 	   "client-connection is not a valid connection"))
-  (let ((client (car client-connection))
-	(client-id #f))
-    (fcntl client F_SETFL (logior O_NONBLOCK
-    				  (fcntl client F_GETFL)))
-    (set-port-encoding! client "UTF-8")
-    (dynamic-wind
-      (lambda () #f)
-      (lambda ()
-	;; identify the client (acquire its context)
-	;; TODO: Create a timeout for identification, after which the
-	;;       connection is dropped
-	(let ((client-context
-	       (do ((context (acquire-context-from-client client)
-			     (acquire-context-from-client client))
-		    (num-tries 1 (1+ num-tries)))
-		   ((or context (> num-tries 3)) context)
-		 (sleep 1))))
-	  (unless client-context
-	    (throw 'client-wont-identify)) ; TODO: catch that exception
-	  (parameterize ((current-read-waiter read-waiter))
-	    ;; event loop to listen for requests from the client
-	    (let ((exit? #f))
-	      (while (not exit?)
-		(let ((line (get-line client)))
-		  (when (or (and (string? line)
-	    			 (string=? (string-trim-right line) "exit"))
-	    		    (eof-object? line))
-	    	    (set! exit? #t))
-		  (monitor
-		   (format #t "~a: ~a\n" client-context line))))))))
-      (lambda ()
-	(monitor (format #t "Closing connection: ~a\n" client))
-	(close-port client)))))
+  (with-throw-handler #t
+    (lambda ()
+      (let ((client-port (car client-connection)))
+       (fcntl client-port F_SETFL (logior O_NONBLOCK
+    					  (fcntl client-port F_GETFL)))
+       (set-port-encoding! client-port "UTF-8")
+       (dynamic-wind
+	 (lambda () #f)
+	 (lambda ()
+	   ;; TODO: Create a timeout for identification, after which the
+	   ;;       connection is dropped
+	   ;; Identify the client (acquire its context).
+	   ;; Try 3 times before dropping the connection.
+	   (catch #t
+	     (lambda ()
+	       (let ((ob-client
+		      (do ((id (ob-request-id client-port)
+			       (ob-request-id client-port))
+			   (num-tries 1 (1+ num-tries)))
+			  ((or id (> num-tries 3)) (cons id client-port))
+			(sleep 1))))
+		 (unless (car ob-client)
+		   (throw 'client-wont-identify)) ; TODO: catch that exception
+		 (format #t "Client identified as: ~S\n"
+			 (car ob-client))
+		 (parameterize ((current-read-waiter read-waiter))
+		   ;; event loop to listen for requests from the client
+		   (while #t
+		     (let ((line (get-line client-port)))
+		       (when (or
+			      (and (string? line)
+	    			   (string=? (string-trim-right line) "exit"))
+	    		      (eof-object? line))
+			 (break))
+		       (monitor (format #t "~a: ~s\n" (car ob-client) line))
+		       (let ((query (ob-query-ask-extract ob-client line)))
+			 (if query
+			     ;; let oxonbot write to string, then send the
+			     ;; response to the client
+			     (display (with-output-to-string
+					(lambda ()
+					  (oxonbot-command (car query)
+							   (cdr query))))
+				      client-port)
+			     (begin
+			       (display ob-query-nak client-port)
+			       (format (current-error-port)
+				       "Bad query from client ~S: ~S\n"
+				       (car ob-client) line)))))))))
+	     (lambda (key . args) ;; catching only 'client-wont-identify
+	       (cond
+		((eq? key 'client-wont-identify)
+		 (monitor (format (current-error-port)
+				  "Client on port ~a won't identify.\n"
+				  client-port))
+		 (display ob-drop-id client-port))
+		((and (eq? key 'system-error)
+		      (let ((errno (system-error-errno (cons key args))))
+			(or (= errno 104)
+			    (= errno 32))))
+		 (monitor (display "Client disconnected.\n")))
+
+		(else #f
+		      (monitor (format (current-error-port)
+	      			       "Error: ~a: ~a\n"
+	      			       key args)))))))
+	 (lambda ()
+	   (monitor (format #t "Closing connection: ~a\n" client-port))
+	   (close-port client-port)))))
+    (lambda args
+      (display (backtrace))
+      (newline))))
 
 (catch #t
   (lambda ()
@@ -146,6 +176,6 @@
     (cond
       ((eq? key 'SIGINT) (display "Exit on keyboard interrupt.\n"))
       (else
-       (throw key args)
-       ;; (format #t "~a: ~a\n" key args)
+       (format #t "~a: ~a\n" key args)
+       ;; (throw key args)
        ))))
