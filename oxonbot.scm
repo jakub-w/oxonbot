@@ -1,5 +1,3 @@
-#!/usr/bin/guile
-!#
 ;; Dependencies:
 ;; external: sqlite3
 ;; guile: guile-sqlite3 (https://notabug.org/guile-sqlite3/guile-sqlite3.git)
@@ -10,11 +8,29 @@
 
 (add-to-load-path "guile-sqlite3/build/")
 
-(use-modules (ice-9 regex)
-	     (ice-9 textual-ports)
-	     (srfi srfi-1)
-	     (srfi srfi-19)
-	     (sqlite3))
+(define-module (oxonbot)
+  #:use-module (ice-9 match)
+  #:use-module (ice-9 regex)
+  #:use-module (ice-9 textual-ports)
+  #:use-module (ice-9 threads)
+  #:use-module (srfi srfi-1)
+  #:use-module (srfi srfi-9)
+  #:use-module (srfi srfi-19)
+  #:use-module (sqlite3)
+  #:export (oxonbot-command
+	    $context
+	    make-context
+	    $context-client-id
+	    $context-path
+	    $context-caller))
+
+;; (use-modules (ice-9 match)
+;; 	     (ice-9 regex)
+;; 	     (ice-9 textual-ports)
+;; 	     (srfi srfi-1)
+;; 	     (srfi srfi-9)
+;; 	     (srfi srfi-19)
+;; 	     (sqlite3))
 
 
 ;; UTILITY FUNCTIONS
@@ -45,13 +61,22 @@
 
 (define (error-log text)
   "Add error to a log file. Use UTC time."
-  (let ((port (open-file "error.log" "a")))
-    (put-string port (format #f "~a\t~a\n"
-			     (current-time-utc)
-			     text))
-    (close-port port)))
+  (monitor
+   (let ((port (open-file "error.log" "a")))
+     (put-string port (format #f "~s\t~s\n"
+			      (current-time-utc)
+			      text))
+     (close-port port))))
 ;; end of logging
 ;; END OF UTILITY FUNCTIONS
+
+
+(define-record-type $context
+  (make-context client-id path caller)
+  $context?
+  (client-id $context-client-id)
+  (path $context-path)
+  (caller $context-caller))
 
 
 ;; INTERNAL FUNCTIONS TO THOSE EXPOSED TO THE COMMAND LINE
@@ -98,23 +123,40 @@
 
 (define db-name "quotes.db")
 
+(define-record-type $bot-quote
+  (make-bot-quote id context date text)
+  bot-quote?
+  (id bot-quote-id)
+  (context bot-quote-context)
+  (date bot-quote-date)
+  (text bot-quote-text))
+
 ;; can throw 'sqlite-error
-(define (quote-add text)
-  (let ((db (sqlite-open db-name (logior SQLITE_OPEN_CREATE
-                                         SQLITE_OPEN_READWRITE))))
-    (when (sqlite-db? db)
-      (sqlite-exec db "
+(define (quote-add context text)
+  (unless ($context? context)
+    (throw 'wrong-type-arg "quote-add"
+	   "Wrong type argument for context: ~S"
+	   (list context)))
+  (match context
+    (($ $context client-id path author)
+     (let ((db (sqlite-open db-name (logior SQLITE_OPEN_CREATE
+                                            SQLITE_OPEN_READWRITE))))
+       (when (sqlite-db? db)
+	 (sqlite-exec db "
 CREATE TABLE IF NOT EXISTS quotes
-(id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, quote TEXT)")
-      (let ((stmt (sqlite-prepare db "
-INSERT INTO quotes(date, quote) VALUES(?,?)")))
-	(sqlite-bind-arguments
-	 stmt
-	 (date->string (current-date) "~d.~m.~Y ~H:~M")
-	 text)
-	(sqlite-step stmt)
-	(sqlite-finalize stmt)))
-    (sqlite-close db)))
+(id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT, path TEXT, author TEXT, date TEXT, quote TEXT)")
+	 (let ((stmt (sqlite-prepare db "
+INSERT INTO quotes(client_id, path, author, date, quote) VALUES(?,?,?,?,?)")))
+	   (sqlite-bind-arguments stmt
+	    client-id
+	    path
+	    author
+	    (date->string (current-date) "~d.~m.~Y ~H:~M")
+	    text)
+	   (sqlite-step stmt)
+	   (sqlite-finalize stmt)))
+       (sqlite-close db)))
+    ))
 
 ;; TODO: do something with this (throw 'user-error ...) since this was moved
 ;;       to more internal function
@@ -131,18 +173,29 @@ BIND-ARGUMENTS is an optional list of arguments to bind if SQL is a prepared
       (let* ((db (sqlite-open db-name SQLITE_OPEN_READONLY))
 	     (stmt (sqlite-prepare
 		    db sql))
-	     (result #f))
+	     (quote-list #f))
 	(if (null? bind-arguments)
-	    (set! result (sqlite-map identity stmt))
+	    (set! quote-list (sqlite-map identity stmt))
 	    (begin
 	      (apply sqlite-bind-arguments (cons stmt bind-arguments))
-	      (set! result (sqlite-step stmt))
+	      (set! quote-list (sqlite-step stmt))
 	      (sqlite-finalize stmt)))
 	(sqlite-close db)
-	(when (or (null? result)
-		  (not result))
-	    (throw 'user-error "Quote not found."))
-	result))
+	(when (or (null? quote-list)
+		  (not quote-list))
+	  (throw 'user-error "Quote not found."))
+	;; ensure that the quote-list type is consistent
+	(unless (list? quote-list)
+	  (set! quote-list (list quote-list)))
+	(map (lambda (db-quote)
+	       (make-bot-quote (vector-ref db-quote 0)   ;; id
+			       (make-context
+				(vector-ref db-quote 1)  ;; client-id
+				(vector-ref db-quote 2)  ;; path
+				(vector-ref db-quote 3)) ;; author
+			       (vector-ref db-quote 4)   ;; date
+			       (vector-ref db-quote 5))) ;; text
+	     quote-list)))
     (lambda (key . args)
       ;; Since db is opened as readonly the missing table cannot be recreated
       ;; so the user is notified that there are no quotes in the database.
@@ -164,12 +217,16 @@ BIND-ARGUMENTS is an optional list of arguments to bind if SQL is a prepared
       (car (quote-get-from-db
 	    "SELECT * FROM quotes ORDER BY id DESC LIMIT 1"))
       ;; this returns a singular entry
-      (quote-get-from-db
-       "SELECT * FROM quotes WHERE id = ?" id)))
+      (car (quote-get-from-db
+	    "SELECT * FROM quotes WHERE id = ?" id))))
 
+;; TODO: fix that to use $bot-quote (or maybe create a printer for quotes)
 (define (format-quote quote)
   (format #f "Quote #~a added ~a by ~a:\n~a\n"
-	  (car quote) (cadr quote) "anonymous" (caddr quote)))
+	  (bot-quote-id quote) ; id
+	  (bot-quote-date quote) ; date
+	  ($context-caller (bot-quote-context quote)) ; author
+	  (bot-quote-text quote)))
 
 ;; end of quote command
 
@@ -238,24 +295,30 @@ roll 10-100 3 : three random numbers from 10 to 100 (and than summed)"
 	(throw 'user-error
 	       (format #f "Command '~a' not found." name)))))
 
+(define (call-command context arg-list)
+  (if (null? arg-list)
+      (format #t "Commands available:~a\n"
+	      (substring/shared
+	       (fold (lambda (fun-obj prev)
+		       (string-append prev ", " (car fun-obj)))
+		     ""
+		     named-functions)
+	       1))
+      (catch #t
+	(lambda ()
+	  (apply (name->function (car arg-list)) (list (cdr arg-list))))
+	(lambda (key . arg-list)
+	  (if (eq? key 'user-error)
+	      (format #t "~a\n" (car arg-list))
+	      (begin
+		(display "Something went wrong...\n")
+		(error-log (format #f "~a: ~a" key arg-list))))))))
+
+(define (oxonbot-command context command-string)
+  "Call the command just like from the command line."
+  (call-command context (string-split command-string char-whitespace?)))
+
 (define (handle-command-line)
-  (let ((args (cdr (command-line))))
-    (if (null? args)
-	(format #t "Commands available:~a\n"
-		(substring/shared
-		 (fold (lambda (fun-obj prev)
-			 (string-append prev ", " (car fun-obj)))
-		       ""
-		       named-functions)
-		 1))
-	(catch #t
-	  (lambda ()
-	    (apply (name->function (car args)) (list (cdr args))))
-	  (lambda (key . args)
-	    (if (eq? key 'user-error)
-		(format #t "~a\n" (car args))
-		(begin
-		  (display "Something went wrong...\n")
-		  (error-log (format #f "~a: ~a" key args)))))))))
+  (call-command ""(cdr (command-line))))
 
 (handle-command-line)
