@@ -31,6 +31,7 @@
 ;; FIXME: When using get-line to extract the message, guile cuts the newline
 ;;        char from it but the current protocol implementation relies on it
 ;;        being there.
+;; TODO: Change the terminating character from newline to end of text
 
 (add-to-load-path ".")
 (define-module (oxonbot-protocol)

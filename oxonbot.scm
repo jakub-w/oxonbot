@@ -220,7 +220,6 @@ BIND-ARGUMENTS is an optional list of arguments to bind if SQL is a prepared
       (car (quote-get-from-db
 	    "SELECT * FROM quotes WHERE id = ?" id))))
 
-;; TODO: fix that to use $bot-quote (or maybe create a printer for quotes)
 (define (format-quote quote)
   (format #f "Quote #~a added ~a by ~a:\n~a\n"
 	  (bot-quote-id quote) ; id

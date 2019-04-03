@@ -6,7 +6,6 @@
 ;; It will be used as part of the context in the database.
 ;; Context will be: client_id, path (like server:#channel), caller (username)
 
-
 (add-to-load-path ".")
 (use-modules (ice-9 rdelim)
 	     (ice-9 threads)
@@ -84,7 +83,7 @@ CLIENT-CONNECTION should be a pair returned from the `accept' function."
 			  ((or id (> num-tries 3)) (cons id client-port))
 			(sleep 1))))
 		 (unless (car ob-client)
-		   (throw 'client-wont-identify)) ; TODO: catch that exception
+		   (throw 'client-wont-identify))
 		 (format #t "Client identified as: ~S\n"
 			 (car ob-client))
 		 (parameterize ((current-read-waiter read-waiter))
