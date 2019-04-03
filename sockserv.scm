@@ -119,8 +119,8 @@ CLIENT-CONNECTION should be a pair returned from the `accept' function."
 		 (display ob-drop-id client-port))
 		((and (eq? key 'system-error)
 		      (let ((errno (system-error-errno (cons key args))))
-			(or (= errno 104)
-			    (= errno 32))))
+			(or (= errno ECONNRESET)
+			    (= errno EPIPE))))
 		 (monitor (display "Client disconnected.\n")))
 
 		(else #f
