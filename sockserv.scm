@@ -58,9 +58,9 @@
 CLIENT-CONNECTION should be a pair returned from the `accept' function."
   (unless (and (pair? client-connection)
 	       (port? (car client-connection)))
-    ;; FIXME: change to wrong-type-arg
-    (throw 'bad-client-connection 'connection-handler
-	   "client-connection is not a valid connection"))
+    (throw 'wrong-type-arg "connection-handler"
+	   "Wrong type argument for CLIENT-CONNECTION: ~S"
+	   (list client-connection)))
   (with-throw-handler #t
     (lambda ()
       (let ((client-port (car client-connection)))
