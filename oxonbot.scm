@@ -5,7 +5,6 @@
 ;; Notes:
 ;; 'user-error is a type of error that will be shown to the user
 
-
 (add-to-load-path "guile-sqlite3/build/")
 
 (define-module (oxonbot)
@@ -18,11 +17,12 @@
   #:use-module (srfi srfi-19)
   #:use-module (sqlite3)
   #:export (oxonbot-command
-	    $context
-	    make-context
-	    $context-client-id
-	    $context-path
-	    $context-caller))
+	    ob-context
+	    make-ob-context
+	    ob-context?
+	    ob-context-client-id
+	    ob-context-path
+	    ob-context-caller))
 
 ;; (use-modules (ice-9 match)
 ;; 	     (ice-9 regex)
@@ -63,25 +63,27 @@
   "Add error to a log file. Use UTC time."
   (monitor
    (let ((port (open-file "error.log" "a")))
-     (put-string port (format #f "~s\t~s\n"
-			      (current-time-utc)
-			      text))
+     (put-string port (simple-format #f "~a\t~a\n"
+				     (current-time-utc)
+				     text))
      (close-port port))))
 ;; end of logging
 ;; END OF UTILITY FUNCTIONS
 
 
-(define-record-type $context
-  (make-context client-id path caller)
-  $context?
-  (client-id $context-client-id)
-  (path $context-path)
-  (caller $context-caller))
+(define-record-type ob-context
+  (make-ob-context client-id path caller)
+  ob-context?
+  (client-id ob-context-client-id)
+  (path ob-context-path)
+  (caller ob-context-caller))
 
 
 ;; INTERNAL FUNCTIONS TO THOSE EXPOSED TO THE COMMAND LINE
 
 ;; roll command
+(define ROLL_REP_LIMIT 1000)
+
 (define (roll-internal . args)
   (let* ((limits (map (lambda (m)
 			(string->number (match:substring m)))
@@ -90,6 +92,11 @@
 	 (repetitions (if (null? (cdr args))
 			  1
 			  (or (string->number (cadr args)) 1))))
+    (cond ((< repetitions 1) (set! repetitions 1))
+	  ((> repetitions ROLL_REP_LIMIT)
+	   (throw 'user-error
+		  (format #f "Roll repetition limit (~a) exceeded."
+			  ROLL_REP_LIMIT))))
     ;; return false if the second value is smaller than the first (roll 20-10)
     ;; if repetitions are less than 1 return false too
     (if (or (zero? limits-len)
@@ -115,9 +122,6 @@
 ;; end of roll command
 
 ;; quote command
-;; TODO: add context column and author to quotes table
-;;       context would be an irc channel or discord channel (maybe in a form
-;;       of irc(freenode):#channel, meaning protocol(server):channel)
 ;; TODO: create ensure-database function that will create database and all of
 ;;       the tables if they don't exist
 
@@ -131,23 +135,41 @@
   (date bot-quote-date)
   (text bot-quote-text))
 
+(define (sql-list->bot-quote lst)
+  "List has to have 6 elements: id, client-id, path, caller, date, text."
+  (unless (= (length lst) 6)
+    (throw 'misc-error
+	   (format #f "list->bot-quote: LST is not 6 elements long - ~s"
+		   lst)))
+  (match-let (((id client-id path caller date text) lst))
+    (make-bot-quote id
+		    (make-ob-context client-id path caller)
+		    date
+		    text)))
+
 ;; can throw 'sqlite-error
 (define (quote-add context text)
-  (unless ($context? context)
+  (unless (ob-context? context)
     (throw 'wrong-type-arg "quote-add"
-	   "Wrong type argument for context: ~S"
+	   "Wrong type argument for CONTEXT: ~S"
 	   (list context)))
   (match context
-    (($ $context client-id path author)
+    (($ ob-context client-id path author)
      (let ((db (sqlite-open db-name (logior SQLITE_OPEN_CREATE
                                             SQLITE_OPEN_READWRITE))))
        (when (sqlite-db? db)
 	 (sqlite-exec db "
 CREATE TABLE IF NOT EXISTS quotes
-(id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT, path TEXT, author TEXT, date TEXT, quote TEXT)")
+(entry INTEGER PRIMARY KEY AUTOINCREMENT, id INTEGER, client_id TEXT, path TEXT, author TEXT, date TEXT, quote TEXT)")
+	 ;; id is unique for every cliend_id-path combination
 	 (let ((stmt (sqlite-prepare db "
-INSERT INTO quotes(client_id, path, author, date, quote) VALUES(?,?,?,?,?)")))
-	   (sqlite-bind-arguments stmt
+INSERT INTO quotes(id, client_id, path, author, date, quote) VALUES((SELECT IFNULL(MAX(id),0)+1 FROM quotes WHERE client_id = ? AND path = ?),?,?,?,?,?)")))
+	   (sqlite-bind-arguments
+	    stmt
+	    ;; selecting proper id
+	    client-id
+	    path
+	    ;; end of selecting id
 	    client-id
 	    path
 	    author
@@ -188,13 +210,13 @@ BIND-ARGUMENTS is an optional list of arguments to bind if SQL is a prepared
 	(unless (list? quote-list)
 	  (set! quote-list (list quote-list)))
 	(map (lambda (db-quote)
-	       (make-bot-quote (vector-ref db-quote 0)   ;; id
-			       (make-context
-				(vector-ref db-quote 1)  ;; client-id
-				(vector-ref db-quote 2)  ;; path
-				(vector-ref db-quote 3)) ;; author
-			       (vector-ref db-quote 4)   ;; date
-			       (vector-ref db-quote 5))) ;; text
+	       (make-bot-quote (vector-ref db-quote 1)   ;; id
+			       (make-ob-context
+				(vector-ref db-quote 2)  ;; client-id
+				(vector-ref db-quote 3)  ;; path
+				(vector-ref db-quote 4)) ;; author
+			       (vector-ref db-quote 5)   ;; date
+			       (vector-ref db-quote 6))) ;; text
 	     quote-list)))
     (lambda (key . args)
       ;; Since db is opened as readonly the missing table cannot be recreated
@@ -207,24 +229,31 @@ BIND-ARGUMENTS is an optional list of arguments to bind if SQL is a prepared
 	    (error-log (format #f "~s: ~s" key args))) ; log it regardless
 	  (throw key args)))))
 
-(define (quote-random)
+(define (quote-random context)
   ;; this returns a list, so car is used to get the entry
-  (car (quote-get-from-db "SELECT * FROM quotes ORDER BY random() LIMIT 1")))
+  (car (quote-get-from-db "SELECT * FROM quotes WHERE client_id=? AND path=? ORDER BY random() LIMIT 1"
+			  (ob-context-client-id context)
+			  (ob-context-path context))))
 
-(define (quote-read id)
+(define (quote-read context id)
   (if (equal? id "last")
       ;; this returns a list, so car is used to get the entry
       (car (quote-get-from-db
-	    "SELECT * FROM quotes ORDER BY id DESC LIMIT 1"))
+	    "SELECT * FROM quotes WHERE client_id=? AND path=? ORDER BY id DESC LIMIT 1"
+	    (ob-context-client-id context)
+	    (ob-context-path context)))
       ;; this returns a singular entry
       (car (quote-get-from-db
-	    "SELECT * FROM quotes WHERE id = ?" id))))
+	    "SELECT * FROM quotes WHERE client_id=? AND path=? AND id=?"
+	    (ob-context-client-id context)
+	    (ob-context-path context)
+	    id))))
 
 (define (format-quote quote)
   (format #f "Quote #~a added ~a by ~a:\n~a\n"
 	  (bot-quote-id quote) ; id
 	  (bot-quote-date quote) ; date
-	  ($context-caller (bot-quote-context quote)) ; author
+	  (ob-context-caller (bot-quote-context quote)) ; author
 	  (bot-quote-text quote)))
 
 ;; end of quote command
@@ -234,7 +263,7 @@ BIND-ARGUMENTS is an optional list of arguments to bind if SQL is a prepared
 
 ;; FUNCTIONS EXPOSED TO THE COMMAND LINE
 
-(define (roll-command args)
+(define (roll-command context args)
   "ARGS have to be <upper>|<lower>-<upper> [repetitions]
 The result of a roll will be in [1, <upper>] or [<lower>, <upper>].
 
@@ -250,14 +279,17 @@ roll 10-100 3 : three random numbers from 10 to 100 (and than summed)"
       (display "Usage: roll <upper>|<lower>-<upper> [repetitions]\n")
       (let ((result (apply roll-internal args)))
 	(when result
-	  (for-each (lambda (roll-result)
-		      (format #t "~s, " roll-result))
-		    (car result))
-	  (format #t "SUM: ~s\n" (cdr result)))
+	  (display (with-output-to-string
+		     (lambda ()
+		       (simple-format #t "~a rolled: "
+				      (ob-context-caller context))
+		       (for-each (lambda (roll-result)
+				   (simple-format #t "~s, " roll-result))
+				 (car result))
+		       (simple-format #t "SUM: ~s\n" (cdr result))))))
 	result)))
 
-;; TODO: check fo
-(define (quote-command args)
+(define (quote-command context args)
   (catch 'sqlite-error
     (lambda ()
       (if (> (length args) 0)
@@ -266,15 +298,14 @@ roll 10-100 3 : three random numbers from 10 to 100 (and than summed)"
       	    (if (< (length args) 2)
       		(display "Usage: quote add <text>\n")
       		(begin
-		  (apply quote-add (list (string-join (cdr args))))
+		  (apply quote-add (list context (string-join (cdr args))))
 		  (display "Quote added successfully.\n"))))
 	   ((equal? (car args) "random")
-	    (display (format-quote (vector->list (quote-random)))))
+	    (display (format-quote (quote-random context))))
 	   ((equal? (car args) "read")
 	    (if (< (length args) 2)
 		(display "Usage: quote read <id>|last\n")
-		(display (format-quote (vector->list
-					(quote-read (cadr args)))))))
+		(display (format-quote (quote-read context(cadr args))))))
 	   (else (format #t "Subcommand '~a' not found.\n" (car args))))
 	  (display "Subcommands available: add, random, read\n")))
     (lambda (key . args)
@@ -305,7 +336,8 @@ roll 10-100 3 : three random numbers from 10 to 100 (and than summed)"
 	       1))
       (catch #t
 	(lambda ()
-	  (apply (name->function (car arg-list)) (list (cdr arg-list))))
+	  (apply (name->function (car arg-list))
+		 (list context (cdr arg-list))))
 	(lambda (key . arg-list)
 	  (if (eq? key 'user-error)
 	      (format #t "~a\n" (car arg-list))
@@ -315,9 +347,13 @@ roll 10-100 3 : three random numbers from 10 to 100 (and than summed)"
 
 (define (oxonbot-command context command-string)
   "Call the command just like from the command line."
-  (call-command context (string-split command-string char-whitespace?)))
+  (with-output-to-string
+    (lambda ()
+      (call-command context (string-split command-string char-whitespace?)))))
 
 (define (handle-command-line)
-  (call-command ""(cdr (command-line))))
+  (call-command (make-ob-context "local" "cmd" (getlogin))
+		(cdr (command-line))))
 
-(handle-command-line)
+(when (> (length (command-line)) 1)
+  (handle-command-line))

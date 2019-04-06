@@ -63,73 +63,81 @@ CLIENT-CONNECTION should be a pair returned from the `accept' function."
 	   (list client-connection)))
   (with-throw-handler #t
     (lambda ()
-      (let ((client-port (car client-connection)))
-       (fcntl client-port F_SETFL (logior O_NONBLOCK
-    					  (fcntl client-port F_GETFL)))
-       (set-port-encoding! client-port "UTF-8")
+      (let ((client (make-ob-client #f (car client-connection))))
+	(fcntl (ob-client-port client)
+	       F_SETFL
+	       (logior O_NONBLOCK (fcntl (ob-client-port client) F_GETFL)))
+       (set-port-encoding! (ob-client-port client) "UTF-8")
        (dynamic-wind
 	 (lambda () #f)
 	 (lambda ()
-	   ;; TODO: Create a timeout for identification, after which the
-	   ;;       connection is dropped
-	   ;; Identify the client (acquire its context).
-	   ;; Try 3 times before dropping the connection.
 	   (catch #t
 	     (lambda ()
-	       (let ((ob-client
-		      (do ((id (ob-request-id client-port)
-			       (ob-request-id client-port))
-			   (num-tries 1 (1+ num-tries)))
-			  ((or id (> num-tries 3)) (cons id client-port))
-			(sleep 1))))
-		 (unless (car ob-client)
-		   (throw 'client-wont-identify))
-		 (format #t "Client identified as: ~S\n"
-			 (car ob-client))
-		 (parameterize ((current-read-waiter read-waiter))
-		   ;; event loop to listen for requests from the client
-		   (while #t
-		     (let ((line (get-line client-port)))
-		       (when (or
-			      (and (string? line)
-	    			   (string=? (string-trim-right line) "exit"))
-	    		      (eof-object? line))
-			 (break))
-		       (monitor (format #t "~a: ~s\n" (car ob-client) line))
-		       (let ((query (ob-query-ask-extract ob-client line)))
-			 (if query
-			     ;; let oxonbot write to string, then send the
-			     ;; response to the client
-			     (display (with-output-to-string
-					(lambda ()
-					  (oxonbot-command (car query)
-							   (cdr query))))
-				      client-port)
-			     (begin
-			       (display ob-query-nak client-port)
-			       (format (current-error-port)
-				       "Bad query from client ~S: ~S\n"
-				       (car ob-client) line)))))))))
+	       ;; TODO: Create a timeout for identification, after which the
+	       ;;       connection is dropped
+	       ;; TODO: This could be moved to a separate function
+	       ;; Identify the client (acquire its context).
+	       ;; Try 3 times before dropping the connection.
+	       (do ((id (ob-request-id (ob-client-port client))
+			(ob-request-id (ob-client-port client)))
+		    (num-tries 1 (1+ num-tries)))
+		   ((or id (> num-tries 3)) (set-ob-client-id! client id))
+		 (sleep 1))
+	       (unless (ob-client-port client)
+		 (throw 'client-wont-identify))
+	       ;; end of client id
+	       (format #t "Client identified as: ~a\n"
+		       (ob-client-id client))
+	       (parameterize ((current-read-waiter read-waiter))
+		 ;; event loop to listen for requests from the client
+		 (while #t
+		   (let ((line (get-message (ob-client-port client))))
+		     (when (or
+			    (and (string? line)
+	    			 (string=? (string-trim-right line) "exit"))
+	    		    (eof-object? line)
+			    (not line))
+		       (break))
+		     (monitor (format #t "~a: ~s\n"
+				      (ob-client-id client)
+				      line))
+		     ;; query is a pair (context . command)
+		     (let ((query (ob-query-ask-extract client line)))
+		       (if query
+			   (display (ob-query-make-response
+				     (car query)
+				     (oxonbot-command (car query)
+			     			      (cdr query)))
+				    (ob-client-port client))
+			   (begin
+			     (display ob-query-nak (ob-client-port client))
+			     (format (current-error-port)
+				     "Bad query from client ~S: ~S\n"
+				     (ob-client-id client) line))))))))
 	     (lambda (key . args) ;; catching only 'client-wont-identify
 	       (cond
 		((eq? key 'client-wont-identify)
 		 (monitor (format (current-error-port)
 				  "Client on port ~a won't identify.\n"
-				  client-port))
-		 (display ob-drop-id client-port))
+				  (ob-client-port client)))
+		 (display ob-drop-id (ob-client-port client)))
 		((and (eq? key 'system-error)
 		      (let ((errno (system-error-errno (cons key args))))
 			(or (= errno ECONNRESET)
 			    (= errno EPIPE))))
-		 (monitor (display "Client disconnected.\n")))
+		 (monitor (format #t "Client ~s disconnected.\n"
+				  (or (ob-client-id client)
+				      (ob-client-port client)))))
 
 		(else #f
 		      (monitor (format (current-error-port)
 	      			       "Error: ~a: ~a\n"
 	      			       key args)))))))
 	 (lambda ()
-	   (monitor (format #t "Closing connection: ~a\n" client-port))
-	   (close-port client-port)))))
+	   (monitor (format #t "Closing connection: ~s\n"
+			    (or (ob-client-id client)
+				(ob-client-port client))))
+	   (close-port (ob-client-port client))))))
     (lambda args
       (display (backtrace))
       (newline))))
