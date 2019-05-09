@@ -6,6 +6,13 @@
 ;; It will be used as part of the context in the database.
 ;; Context will be: client_id, path (like server:#channel), caller (username)
 
+;; COMMAND LINE ARGUMENTS:
+;; none - listen on both local and tcp sockets
+;; "tcp" - listen only on tcp socket
+;; "local" - listen only on local socket
+
+;; TODO: add support for TCP sockets (for docker)
+
 (add-to-load-path ".")
 (use-modules (ice-9 rdelim)
 	     (ice-9 threads)
@@ -148,18 +155,37 @@ CLIENT-CONNECTION should be a pair returned from the `accept' function."
 		     "/tmp/oxonbot"
 		     (number->string (passwd:uid (getpw (getlogin))))))
 	   (sockpath (string-append sockdir "/socket"))
-	   (sock (socket PF_UNIX SOCK_STREAM 0)))
-      (unless (file-exists? sockdir)
+	   ;; in the child the INET socket will be open instead of UNIX
+	   (child-pid (or
+		       ;; if a command-line argument states the type of a
+		       ;; connection to be opened - don't fork
+		       ;; instead assign zero or non-zero to child-pid
+		       (and (> (length (program-arguments)) 1)
+			    (let ((arg (cadr (program-arguments))))
+			      (cond ((string= arg "tcp") 0)
+				    ((string= arg "local") 1)
+				    (else #f))))
+		       (primitive-fork)))
+	   (sock (if (zero? child-pid)
+		     (socket PF_INET SOCK_STREAM 0)
+		     (socket PF_UNIX SOCK_STREAM 0))))
+      ;; INET socket doesn't need sockdir
+      (unless (or (file-exists? sockdir) (zero? child-pid))
 	(mkdir sockdir))
       (dynamic-wind
 	(lambda () #f)			; dynamic wind in_guard
 	(lambda ()			; dynamic wind thunk
-	  (bind sock (make-socket-address AF_UNIX sockpath))
+	  (if (zero? child-pid)
+	      (bind sock AF_INET INADDR_ANY 4563)
+	      (bind sock AF_UNIX sockpath))
 	  ;; set the listener socket to be non-blocking
 	  (fcntl sock F_SETFL (logior O_NONBLOCK
   				      (fcntl sock F_GETFL)))
 	  (listen sock 5)
-	  (display "Listening for clients...\n")
+	  (monitor (format #t "~A: Listening for clients...\n"
+			   (if (zero? child-pid)
+			       "TCP/IP"
+			       "LOCAL")))
 
 	  (parameterize ((current-read-waiter read-waiter))
 	    (let ((new-connection #f)
@@ -167,17 +193,19 @@ CLIENT-CONNECTION should be a pair returned from the `accept' function."
 	      (while (not exit?)
 		(set! new-connection (accept sock))
 		(when new-connection
-  		  (format #t "New connection: ~a\n" new-connection)
+  		  (monitor (format #t "New connection: ~a\n" new-connection))
 		  (set! connection-threads
 		    (cons (begin-thread
 			   (connection-handler new-connection))
 			  connection-threads)))
 		(connection-threads-cleanup)
-		(format #t "Connections active: ~a\n"
-			(length connection-threads))))))
+		;; (format #t "Connections active: ~a\n"
+		;; 	(length connection-threads))
+		))))
 	(lambda () 			; dynamic wind post_guard
 	  (close sock)
-	  (delete-file sockpath)))))
+	  (unless (zero? child-pid)
+	    (delete-file sockpath))))))
   ;; catch handler
   (lambda (key . args)
     (cond
