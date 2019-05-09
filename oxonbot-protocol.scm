@@ -171,7 +171,7 @@ malformed or wrong type/subtype."
      ;;            for correctness for better error-catching
      (let ((message-match
 	    (string-match
-	     "^Q\x1dASK\x1d([a-zA-Z0-9_\\/]+)\x1f(\\w+)\x1f(.*)\x03$"
+	     "^Q\x1dASK\x1d([[:graph:][:blank:]]+)\x1f([^\x1f]*)\x1f([^\x03]*)\x03$"
 	     message)))
        (if (eq? #f message-match)
 	   (return #f)
