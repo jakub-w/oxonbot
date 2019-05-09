@@ -1,9 +1,6 @@
 #!/usr/bin/python3
 
 import socket
-from os import getuid
-# from sys import stdin
-# from time import sleep
 import re
 
 
@@ -51,6 +48,54 @@ class QueryResponse(Message):
             self.text = matches.group(3)
 
 
+class OxonbotClient:
+    sock = None
+    connected = None
+
+    def __init__(self, id: str, ip: str, port: int):
+        self.id = id
+        self.ip = ip
+        self.port = port
+
+    def __del__(self):
+        if self.sock:
+            self.sock.close()
+
+    def Connect(self):
+        if self.connected:
+            return
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # self.addr = socket.getaddrinfo(self.ip, self.port, socket.AF_INET)
+        self.sock.connect((self.ip, self.port))
+
+        # this should be an ID request
+        msg = Message(read_line_to_str(self.sock))
+        if msg.msg_type == 'ID' and msg.msg_subtype == 'REQ':
+            if msg.msg_type == 'ID' and msg.msg_subtype == 'REQ':
+                self.sock.send(ob_id_make_response(self.id))
+            else:
+                return None
+
+        # this should be ID:ACK
+        msg = Message(read_line_to_str(self.sock))
+
+        self.connected = True
+        return True
+
+    # TODO: take caller as an argument (also modify ob_create_request)
+    def SendQuery(self, path: str, caller: str, query: str):
+        if not self.connected:
+            return None
+        self.sock.send(
+            ob_create_request(path, caller, query).encode('utf-8'))
+        msg = Message(read_line_to_str(self.sock))
+        if msg.msg_type == 'Q' and msg.msg_subtype == 'RES':
+            msg = QueryResponse(msg)
+            return msg
+        return None
+
+
 def ob_id_make_response(id: str):
     if not isinstance(id, str):
         raise TypeError
@@ -61,8 +106,8 @@ def ob_id_make_response(id: str):
     return None
 
 
-def ob_create_request(command: str):
-    return "Q" + chr(29) + "ASK" + chr(29) + "cmd" + chr(31) + "caller"\
+def ob_create_request(path: str, caller: str, command: str):
+    return "Q" + chr(29) + "ASK" + chr(29) + path + chr(31) + caller\
         + chr(31) + command + chr(3)
 
 
@@ -91,35 +136,3 @@ def read_line_to_str(sock: socket):
         elif buf_str[-1] == '\n':
             break
     return line
-
-
-address = "/tmp/oxonbot" + str(getuid()) + "/socket"
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(address)
-
-msg = Message(read_line_to_str(s))
-print(msg)
-if msg.msg_type == 'ID' and msg.msg_subtype == 'REQ':
-    s.send(ob_id_make_response('python'))
-    print('Id sent', end='\n\n')
-else:
-    print('No id req?', end='\n\n')
-
-msg = Message(read_line_to_str(s))
-print(msg)
-
-s.send(ob_create_request("roll 100 10").encode("utf-8"))
-print('Request sent', end='\n\n')
-msg = Message(read_line_to_str(s))
-if msg.msg_subtype == 'RES':
-    msg = QueryResponse(msg)
-    print(msg.text)
-
-s.send(ob_create_request("quote random").encode("utf-8"))
-print('Request sent', end='\n\n')
-msg = Message(read_line_to_str(s))
-if msg.msg_subtype == 'RES':
-    msg = QueryResponse(msg)
-    print(msg.text)
-
-s.close()
