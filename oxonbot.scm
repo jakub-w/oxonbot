@@ -1,3 +1,21 @@
+;; Copyright (C) 2019 Jakub Wojciech <jakub-w@riseup.net>
+
+;; This file is part of Oxonbot.
+
+;;     Oxonbot is free software: you can redistribute it and/or modify
+;;     it under the terms of the GNU General Public License as published by
+;;     the Free Software Foundation, either version 3 of the License, or
+;;     (at your option) any later version.
+
+;;     Oxonbot is distributed in the hope that it will be useful,
+;;     but WITHOUT ANY WARRANTY; without even the implied warranty of
+;;     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;;     GNU General Public License for more details.
+
+;;     You should have received a copy of the GNU General Public License
+;;     along with Oxonbot.  If not, see <https://www.gnu.org/licenses/>.
+
+
 ;; Dependencies:
 ;; external: sqlite3
 ;; guile: guile-sqlite3 (https://notabug.org/guile-sqlite3/guile-sqlite3.git)
@@ -5,7 +23,11 @@
 ;; Notes:
 ;; 'user-error is a type of error that will be shown to the user
 
-(add-to-load-path "guile-sqlite3/build/")
+;; TODO: let the user choose the time zone for the path and format in which
+;;       the time of adding a quote is shown
+;;       give an option of showing how long ago the quote was added
+
+(add-to-load-path ".")
 
 (define-module (oxonbot)
   #:use-module (ice-9 match)
@@ -23,15 +45,6 @@
 	    ob-context-client-id
 	    ob-context-path
 	    ob-context-caller))
-
-;; (use-modules (ice-9 match)
-;; 	     (ice-9 regex)
-;; 	     (ice-9 textual-ports)
-;; 	     (srfi srfi-1)
-;; 	     (srfi srfi-9)
-;; 	     (srfi srfi-19)
-;; 	     (sqlite3))
-
 
 ;; UTILITY FUNCTIONS
 ;; (define (get-previous-line port)
@@ -84,6 +97,7 @@
 ;; roll command
 (define ROLL_REP_LIMIT 1000)
 
+;; TODO: Maybe saving the roll results into a list isn't a good idea.
 (define (roll-internal . args)
   (let* ((limits (map (lambda (m)
 			(string->number (match:substring m)))

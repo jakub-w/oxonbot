@@ -1,0 +1,88 @@
+* Overview
+Oxonbot is an all-purpose bot. It's basically a daemon that listens for requests so it can be connected to any number of clients. Currently there is only one client implementation - for Discord.
+
+** How does it work
+The main Scheme file is ~sockserv.scm~. When started it listens for connections on UNIX socket located at ~/tmp/oxonbot/socket~ and on INET (TCP/IPv4) socket, port 4563.
+
+A client connecting to it has to know the protocol defined in ~oxonbot-protocol.scm~ (the documentation for the protocol is there, although not entirely complete).
+There is a barebones client implementation for Python in ~obclient.py~ that knows how to talk to sockserv.
+
+The last missing piece is a part that will connect this python client to a chat. This is what ~discordbot.py~ does - it creates an instance of OxonbotClient, connects to Discord and passes messages from there to the sockserv. Then returns a response.
+
+* Getting started
+** Dependencies
+*** For oxonbot itself
+- sqlite3
+- guile 2.0
+*** For a Python client
+- python3
+*** For the Discord bot
+- python3
+- discord.py (can be obtained with ~pip install discord~)
+*** WARNING
+Last time I checked ~discord~ python package was incompatible with the latest version of one of its dependencies and wouldn't work.
+
+** Instructions
+#+BEGIN_SRC bash
+  git clone --recursive https://github.com/jakub-w/oxonbot.git && \
+      cd oxonbot && \
+      make
+#+END_SRC
+
+This will create ~output~ directory where all of the necessary files will be.
+
+To start an oxonbot server do:
+#+BEGIN_SRC bash
+  guile sockserv.scm tcp
+#+END_SRC
+
+To start discord bot that will connect to sockserv you need to create a config file with an discord API key.
+
+The file must be named ~discordbot.conf~ and contain:
+#+BEGIN_SRC conf
+  [Default]
+  API_KEY = YourDiscordApiKey
+#+END_SRC
+
+After the configuration file was created, starting the discord client is as simple as:
+#+BEGIN_SRC bash
+  python3 discordbot.py
+#+END_SRC
+
+* Details
+** sockserv.scm
+If run with no arguments it starts listening on both local and TCP sockets. You can choose the type of socket by passing ~tcp~ or ~local~ argument.
+
+The clients connecting to it have to identify with a unique id. It's important that it is unique because if two clients had the same value for it, they would share the same space when adding and retrieving stuff from the database.
+** oxonbot.scm
+This file contains all of the bot's functions.
+
+It can be used from command line, without the server:
+#+BEGIN_SRC bash
+  guile oxonbot.scm roll 100
+#+END_SRC
+
+#+RESULTS:
+jakub-w rolled: 33, SUM: 33
+
+Currently there are a few commands:
+- roll :: Generate a random number.
+- quote :: Add or display a random quote.
+
+Usage rules of the commands can be obtained by invoking them without any arguments (e.g. ~guile oxonbot.scm roll~).
+** obclient.py
+Let's say it's a library with utilities to connect to an oxonbot server. For reasons unknown (I think I did that because I wanted it to be usable in docker) I implemented ~OxonbotClient~ class only using TCP socket.
+
+The ~OxonbotClient~ class when constructed takes an ~id~ as an argument. It's important it's unique as explained [[*sockserv.scm][above]].
+** discordbot.py
+This file imports ~discord~ package and creates a bot for Discord. Using ~obclient~ it talks to the oxonbot server.
+It's really simple, doesn't do much, just passing messages from Discord channels it's in straight to the oxonbot.
+
+Discord users can invoke oxonbot commands just like you would from the command line but adding '.' to the message beginning, e.g. ~.quote random~.
+* Roadmap
+This project was made mainly for learning purposes. Scheme/Guile is a really cool language.
+I don't really plan to do anything with this bot at the moment. If someone were to use it, I would probably maintain it though, maybe even implement new features if requested.
+The hard stuff is already written, so it shouldn't be a big problem.
+
+My TODO list consists of improvments to ~quote~ command. It shows the date of addition in UTC so it would be nice if server admin could set the timezone or format, like time elapsed. Deletion of quotes is also not supported through a command. You need to remove quotes directly from the database file.
+I won't be doing that anytime soon.
