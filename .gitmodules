@@ -1,0 +1,3 @@
+[submodule "guile-sqlite3"]
+	path = guile-sqlite3
+	url = https://notabug.org/guile-sqlite3/guile-sqlite3.git
