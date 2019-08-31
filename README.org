@@ -1,5 +1,5 @@
 * Overview
-Oxonbot is an all-purpose bot. It's basically a daemon that listens for requests so it can be connected to any number of clients. Currently there is only one client implementation - for Discord.
+Oxonbot is an all-purpose chat-bot. It's basically a daemon that listens for requests so it can be connected to any number of clients. Currently there is only one client implementation - for Discord.
 
 ** How does it work
 The main Scheme file is ~sockserv.scm~. When started it listens for connections on UNIX socket located at ~/tmp/oxonbot/socket~ and on INET (TCP/IPv4) socket, port 4563.
@@ -14,6 +14,9 @@ The last missing piece is a part that will connect this python client to a chat.
 *** For oxonbot itself
 - sqlite3
 - guile 2.0
+- autoconf (guile-sqlite3 dependency)
+- automake (guile-sqlite3 dependency)
+- pkg-config (guile-sqlite3 dependency)
 *** For a Python client
 - python3
 *** For the Discord bot
@@ -43,6 +46,7 @@ The file must be named ~discordbot.conf~ and contain:
   [Default]
   API_KEY = YourDiscordApiKey
 #+END_SRC
+Of course you need to replace 'YourDiscordApiKey' with your Discord API key.
 
 After the configuration file was created, starting the discord client is as simple as:
 #+BEGIN_SRC bash
@@ -58,12 +62,12 @@ The clients connecting to it have to identify with a unique id. It's important t
 This file contains all of the bot's functions.
 
 It can be used from command line, without the server:
-#+BEGIN_SRC bash
+#+BEGIN_SRC bash :exports both
   guile oxonbot.scm roll 100
 #+END_SRC
 
 #+RESULTS:
-jakub-w rolled: 33, SUM: 33
+| lampilelo rolled: 98, SUM: 98  |
 
 Currently there are a few commands:
 - roll :: Generate a random number.

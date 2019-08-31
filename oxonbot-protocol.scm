@@ -46,8 +46,6 @@
 ;;; path can be any number of word and '/' characters
 ;;; caller can consist of only word characters
 
-;; TODO: ob-msg could be a record with type, subtype, content fields
-
 (add-to-load-path ".")
 (define-module (oxonbot-protocol)
   #:use-module (ice-9 control)

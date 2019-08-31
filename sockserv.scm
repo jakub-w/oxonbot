@@ -29,8 +29,6 @@
 ;; "tcp" - listen only on tcp socket
 ;; "local" - listen only on local socket
 
-;; TODO: add support for TCP sockets (for docker)
-
 (add-to-load-path ".")
 (use-modules (ice-9 rdelim)
 	     (ice-9 threads)
@@ -98,8 +96,6 @@ CLIENT-CONNECTION should be a pair returned from the `accept' function."
 	 (lambda ()
 	   (catch #t
 	     (lambda ()
-	       ;; TODO: Create a timeout for identification, after which the
-	       ;;       connection is dropped
 	       ;; TODO: This could be moved to a separate function
 	       ;; Identify the client (acquire its context).
 	       ;; Try 3 times before dropping the connection.
